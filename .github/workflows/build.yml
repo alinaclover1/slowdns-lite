@@ -64,7 +64,7 @@ jobs:
           if min(tot.values()) == 0:
               sys.exit("PATCH GAGAL: kode dnstt berbeda dari yang diperkirakan, kirim log ini ke Claude")
           PY
-          go get github.com/xjasonlyu/tun2socks/v2@v2.5.2
+          go get github.com/eycorsican/go-tun2socks@v1.16.11
           go get golang.org/x/crypto@latest
           go get golang.org/x/mobile@latest
           go mod tidy
