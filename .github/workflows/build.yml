@@ -1,0 +1,95 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Susun struktur project
+        run: |
+          set -e
+          mkdir -p app/src/main/java/id/slowdns/lite app/libs golib/core golib/dnstt
+          cp app.gradle.kts app/build.gradle.kts
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp MainActivity.kt app/src/main/java/id/slowdns/lite/MainActivity.kt
+          cp core.go golib/core/core.go
+          cp glue.go golib/dnstt/glue.go
+          printf -- '-keep class go.** { *; }\n-keep class core.** { *; }\n-dontwarn **\n' > app/proguard-rules.pro
+
+      - name: Siapkan dan patch dnstt (NULL)
+        working-directory: golib
+        run: |
+          set -e
+          printf 'module golib\n\ngo 1.22\n' > go.mod
+          printf '//go:build tools\n\npackage golib\n\nimport _ "golang.org/x/mobile/bind"\n' > tools.go
+          go get www.bamsoftware.com/git/dnstt.git/dns@latest
+          DIR=$(go list -m -f '{{.Dir}}' www.bamsoftware.com/git/dnstt.git)
+          echo "dnstt di: $DIR"
+          cp "$DIR"/dnstt-client/*.go dnstt/
+          chmod u+w dnstt/*.go
+          rm -f dnstt/*_test.go
+          python3 - <<'PY'
+          import glob, re, sys
+          tot = {"qtype": 0, "decode": 0, "main": 0}
+          for f in glob.glob("dnstt/*.go"):
+              if f.endswith("glue.go"):
+                  continue
+              s = open(f).read()
+              s = re.sub(r'^package main\b', 'package dnstt', s, flags=re.M)
+              s, a = re.subn(r'\bdns\.RRTypeTXT\b', 'QType', s)
+              s, b = re.subn(r'\bdns\.DecodeRDataTXT\(', 'decodeRData(', s)
+              s, c = re.subn(r'^func main\(\)', 'func clientMain()', s, flags=re.M)
+              tot["qtype"] += a; tot["decode"] += b; tot["main"] += c
+              open(f, "w").write(s)
+          print("patch:", tot)
+          if min(tot.values()) == 0:
+              sys.exit("PATCH GAGAL: kode dnstt berbeda dari yang diperkirakan, kirim log ini ke Claude")
+          PY
+          go get github.com/xjasonlyu/tun2socks/v2@v2.5.2
+          go get golang.org/x/crypto@latest
+          go get golang.org/x/mobile@latest
+          go mod tidy
+
+      - name: Build inti Go (gomobile)
+        working-directory: golib
+        run: |
+          set -e
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          echo "NDK: $ANDROID_NDK_HOME"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          gomobile init
+          gomobile bind -target=android/arm64,android/arm -androidapi 24 -trimpath -ldflags="-s -w" -o ../app/libs/core.aar ./core
+          ls -la ../app/libs
+
+      - name: Build APK
+        run: |
+          set -e
+          mkdir -p ~/.android
+          [ -f ~/.android/debug.keystore ] || keytool -genkeypair -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          gradle assembleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SlowDNS-Lite-apk
+          path: app/build/outputs/apk/release/*.apk
+          
